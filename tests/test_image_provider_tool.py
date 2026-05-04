@@ -16,9 +16,6 @@ def install_astrbot_stubs() -> None:
     event = types.ModuleType("astrbot.api.event")
     components = types.ModuleType("astrbot.api.message_components")
     star = types.ModuleType("astrbot.api.star")
-    core = types.ModuleType("astrbot.core")
-    agent = types.ModuleType("astrbot.core.agent")
-    agent_message = types.ModuleType("astrbot.core.agent.message")
 
     class Logger:
         def debug(self, *_args, **_kwargs):
@@ -60,10 +57,6 @@ def install_astrbot_stubs() -> None:
         def __init__(self, context):
             self.context = context
 
-    class TextPart:
-        def __init__(self, text):
-            self.text = text
-
     api.logger = Logger()
     event.AstrMessageEvent = AstrMessageEvent
     event.MessageChain = MessageChain
@@ -71,16 +64,12 @@ def install_astrbot_stubs() -> None:
     components.Image = Image
     star.Context = Context
     star.Star = Star
-    agent_message.TextPart = TextPart
 
     sys.modules["astrbot"] = astrbot
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.message_components"] = components
     sys.modules["astrbot.api.star"] = star
-    sys.modules["astrbot.core"] = core
-    sys.modules["astrbot.core.agent"] = agent
-    sys.modules["astrbot.core.agent.message"] = agent_message
 
 
 install_astrbot_stubs()
@@ -205,13 +194,13 @@ class ImageProviderToolTests(unittest.TestCase):
         self.assertEqual(context.llm_generate_calls, [])
         call = context.provider.calls[0]
         self.assertNotIn("system_prompt", call)
-        self.assertIn("图片提示词：画一只猫", call["prompt"])
-        self.assertEqual(call["contexts"], [])
-        self.assertEqual(len(call["extra_user_content_parts"]), 1)
-        self.assertEqual(
-            call["extra_user_content_parts"][0].text,
-            "请直接生成图片，并只返回可下载图片 URL、Markdown 图片、JSON 图片字段或 base64 图片数据。",
-        )
+        self.assertIsNone(call["prompt"])
+        self.assertEqual(len(call["contexts"]), 1)
+        message = call["contexts"][0]
+        self.assertEqual(message["role"], "user")
+        self.assertEqual(len(message["content"]), 1)
+        self.assertEqual(message["content"][0]["type"], "text")
+        self.assertIn("图片提示词：画一只猫", message["content"][0]["text"])
 
     def test_falls_back_to_llm_generate_for_legacy_provider(self):
         provider = LegacyProvider(FakeResponse("这里只是普通文本"))

@@ -258,47 +258,40 @@ class ImageProviderToolPlugin(Star):
         return "\n".join(lines)
 
     @staticmethod
-    def _structured_prompt_tail() -> str:
-        return "请直接生成图片，并只返回可下载图片 URL、Markdown 图片、JSON 图片字段或 base64 图片数据。"
-
-    @staticmethod
-    def _make_text_part(text: str) -> Optional[Any]:
-        try:
-            from astrbot.core.agent.message import TextPart  # type: ignore
-
-            return TextPart(text=text)
-        except Exception as exc:
-            logger.debug(f"[Image Provider Tool] 当前 AstrBot 不支持 TextPart: {exc}")
-            return None
-
-    @staticmethod
-    def _supports_extra_user_content_parts(func: Any) -> bool:
+    def _supports_structured_contexts(func: Any) -> bool:
         try:
             signature = inspect.signature(func)
         except (TypeError, ValueError):
             return True
-        if "extra_user_content_parts" in signature.parameters:
+        if "contexts" in signature.parameters:
             return True
         return any(
             param.kind == inspect.Parameter.VAR_KEYWORD
             for param in signature.parameters.values()
         )
 
+    @staticmethod
+    def _structured_user_context(user_prompt: str) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": user_prompt,
+                }
+            ],
+        }
+
     async def _call_provider_text_chat(self, provider: Any, user_prompt: str) -> Any:
         text_chat = getattr(provider, "text_chat", None)
         if not callable(text_chat):
             return None
-        if not self._supports_extra_user_content_parts(text_chat):
-            return None
-
-        text_part = self._make_text_part(self._structured_prompt_tail())
-        if text_part is None:
+        if not self._supports_structured_contexts(text_chat):
             return None
 
         return await text_chat(
-            prompt=user_prompt,
-            contexts=[],
-            extra_user_content_parts=[text_part],
+            prompt=None,
+            contexts=[self._structured_user_context(user_prompt)],
         )
 
     async def _call_provider(self, provider_id: str, user_prompt: str) -> Any:
