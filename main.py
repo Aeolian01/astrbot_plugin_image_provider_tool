@@ -187,13 +187,23 @@ class ImageProviderToolPlugin(Star):
                 return str(value)
         return ""
 
+    async def _get_provider_by_id(self, provider_id: str) -> Any:
+        getter = getattr(self.context, "get_provider_by_id", None)
+        if not callable(getter):
+            return None
+        try:
+            return await self._maybe_await(getter(provider_id))
+        except Exception as exc:
+            logger.warning(
+                f"[Image Provider Tool] 获取 Provider 失败: {provider_id}: {exc}"
+            )
+            return None
+
     async def _resolve_provider_id(self, event: AstrMessageEvent) -> Optional[str]:
         if self.cfg.image_provider_id:
-            getter = getattr(self.context, "get_provider_by_id", None)
-            if callable(getter):
-                provider = await self._maybe_await(getter(self.cfg.image_provider_id))
-                if provider:
-                    return self.cfg.image_provider_id
+            provider = await self._get_provider_by_id(self.cfg.image_provider_id)
+            if provider:
+                return self.cfg.image_provider_id
             logger.warning(
                 f"[Image Provider Tool] 配置的 Provider 不可用: {self.cfg.image_provider_id}"
             )
@@ -248,11 +258,62 @@ class ImageProviderToolPlugin(Star):
         return "\n".join(lines)
 
     @staticmethod
-    def _system_prompt() -> str:
-        return (
-            "你是一个文生图 Provider 调用器。请调用当前 Provider 的图片生成能力。"
-            "若 Provider 支持 Qwen-Image、Wan 或其他图像模型，请生成图片并返回图片 URL、"
-            "Markdown 图片链接、JSON 图片字段或 base64 图片数据。不要返回无关解释。"
+    def _structured_prompt_tail() -> str:
+        return "请直接生成图片，并只返回可下载图片 URL、Markdown 图片、JSON 图片字段或 base64 图片数据。"
+
+    @staticmethod
+    def _make_text_part(text: str) -> Optional[Any]:
+        try:
+            from astrbot.core.agent.message import TextPart  # type: ignore
+
+            return TextPart(text=text)
+        except Exception as exc:
+            logger.debug(f"[Image Provider Tool] 当前 AstrBot 不支持 TextPart: {exc}")
+            return None
+
+    @staticmethod
+    def _supports_extra_user_content_parts(func: Any) -> bool:
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return True
+        if "extra_user_content_parts" in signature.parameters:
+            return True
+        return any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+
+    async def _call_provider_text_chat(self, provider: Any, user_prompt: str) -> Any:
+        text_chat = getattr(provider, "text_chat", None)
+        if not callable(text_chat):
+            return None
+        if not self._supports_extra_user_content_parts(text_chat):
+            return None
+
+        text_part = self._make_text_part(self._structured_prompt_tail())
+        if text_part is None:
+            return None
+
+        return await text_chat(
+            prompt=user_prompt,
+            contexts=[],
+            extra_user_content_parts=[text_part],
+        )
+
+    async def _call_provider(self, provider_id: str, user_prompt: str) -> Any:
+        provider = await self._get_provider_by_id(provider_id)
+        if provider is not None:
+            llm_resp = await self._call_provider_text_chat(provider, user_prompt)
+            if llm_resp is not None:
+                return llm_resp
+
+        llm_generate = getattr(self.context, "llm_generate", None)
+        if not callable(llm_generate):
+            raise RuntimeError("当前 AstrBot Context 不支持 llm_generate")
+        return await llm_generate(
+            chat_provider_id=provider_id,
+            prompt=user_prompt,
         )
 
     def _extract_image_candidates(self, text: Any, raw: Any = None) -> list[ImageCandidate]:
@@ -507,11 +568,7 @@ class ImageProviderToolPlugin(Star):
         )
 
         try:
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=user_prompt,
-                system_prompt=self._system_prompt(),
-            )
+            llm_resp = await self._call_provider(provider_id, user_prompt)
         except Exception as exc:
             logger.error(f"[Image Provider Tool] Provider 调用失败: {exc}", exc_info=True)
             yield f"文生图失败：Provider 调用失败：{exc}"

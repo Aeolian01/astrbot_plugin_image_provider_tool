@@ -16,6 +16,9 @@ def install_astrbot_stubs() -> None:
     event = types.ModuleType("astrbot.api.event")
     components = types.ModuleType("astrbot.api.message_components")
     star = types.ModuleType("astrbot.api.star")
+    core = types.ModuleType("astrbot.core")
+    agent = types.ModuleType("astrbot.core.agent")
+    agent_message = types.ModuleType("astrbot.core.agent.message")
 
     class Logger:
         def debug(self, *_args, **_kwargs):
@@ -57,6 +60,10 @@ def install_astrbot_stubs() -> None:
         def __init__(self, context):
             self.context = context
 
+    class TextPart:
+        def __init__(self, text):
+            self.text = text
+
     api.logger = Logger()
     event.AstrMessageEvent = AstrMessageEvent
     event.MessageChain = MessageChain
@@ -64,12 +71,16 @@ def install_astrbot_stubs() -> None:
     components.Image = Image
     star.Context = Context
     star.Star = Star
+    agent_message.TextPart = TextPart
 
     sys.modules["astrbot"] = astrbot
     sys.modules["astrbot.api"] = api
     sys.modules["astrbot.api.event"] = event
     sys.modules["astrbot.api.message_components"] = components
     sys.modules["astrbot.api.star"] = star
+    sys.modules["astrbot.core"] = core
+    sys.modules["astrbot.core.agent"] = agent
+    sys.modules["astrbot.core.agent.message"] = agent_message
 
 
 install_astrbot_stubs()
@@ -97,26 +108,41 @@ class FakeProviderMeta:
 
 
 class FakeProvider:
-    def meta(self):
-        return FakeProviderMeta()
-
-
-class FakeContext:
     def __init__(self, response=None):
         self.response = response or FakeResponse()
         self.calls = []
+
+    def meta(self):
+        return FakeProviderMeta()
+
+    async def text_chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.response
+
+
+class LegacyProvider(FakeProvider):
+    async def text_chat(self, prompt=None):
+        self.calls.append({"prompt": prompt})
+        return self.response
+
+
+class FakeContext:
+    def __init__(self, response=None, provider=None):
+        self.response = response or FakeResponse()
+        self.provider = provider or FakeProvider(self.response)
+        self.llm_generate_calls = []
 
     async def get_current_chat_provider_id(self, umo=None):
         return ""
 
     def get_provider_by_id(self, provider_id):
-        return FakeProvider() if provider_id == "configured-provider" else None
+        return self.provider if provider_id == "configured-provider" else None
 
     def get_all_providers(self):
-        return [FakeProvider()]
+        return [self.provider]
 
     async def llm_generate(self, **kwargs):
-        self.calls.append(kwargs)
+        self.llm_generate_calls.append(kwargs)
         return self.response
 
 
@@ -170,6 +196,31 @@ class ImageProviderToolTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertIn("Provider 未返回可提取的图片", result[0])
         self.assertIn("这里只是普通文本", result[0])
+
+    def test_provider_call_uses_structured_user_content(self):
+        context = FakeContext(FakeResponse("这里只是普通文本"))
+        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        collect_async(plugin.generate_image(FakeEvent(), "画一只猫"))
+        self.assertEqual(len(context.provider.calls), 1)
+        self.assertEqual(context.llm_generate_calls, [])
+        call = context.provider.calls[0]
+        self.assertNotIn("system_prompt", call)
+        self.assertIn("图片提示词：画一只猫", call["prompt"])
+        self.assertEqual(call["contexts"], [])
+        self.assertEqual(len(call["extra_user_content_parts"]), 1)
+        self.assertEqual(
+            call["extra_user_content_parts"][0].text,
+            "请直接生成图片，并只返回可下载图片 URL、Markdown 图片、JSON 图片字段或 base64 图片数据。",
+        )
+
+    def test_falls_back_to_llm_generate_for_legacy_provider(self):
+        provider = LegacyProvider(FakeResponse("这里只是普通文本"))
+        context = FakeContext(FakeResponse("这里只是普通文本"), provider)
+        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        collect_async(plugin.generate_image(FakeEvent(), "画一只猫"))
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(len(context.llm_generate_calls), 1)
+        self.assertNotIn("system_prompt", context.llm_generate_calls[0])
 
     def test_base64_image_is_saved_and_sent(self):
         png = base64.b64encode(
