@@ -1,0 +1,48 @@
+{
+  "enable": {
+    "description": "启用",
+    "hint": "启用后注册 generate_image 工具，让大模型可主动调用 AstrBot Provider 生成图片。",
+    "type": "bool",
+    "default": true
+  },
+  "image_provider_id": {
+    "description": "文生图 Provider ID",
+    "hint": "选择 AstrBot WebUI 中已配置、可处理文生图请求的 Provider。留空时尝试使用当前会话 Provider，再回退到第一个可用 Provider。",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "default_model_name": {
+    "description": "默认模型名",
+    "hint": "默认写入文生图提示中的模型名。底层是否真正切换模型取决于所选 AstrBot Provider。",
+    "type": "string",
+    "default": "qwen-image-2.0-pro"
+  },
+  "model_aliases": {
+    "description": "可选模型名列表",
+    "hint": "generate_image 的 model 参数只允许填写这里列出的模型名。留空表示只允许默认模型。",
+    "type": "list",
+    "default": [
+      "qwen-image-2.0-pro",
+      "wan2.7-image-pro"
+    ]
+  },
+  "max_prompt_chars": {
+    "description": "最大提示词长度",
+    "hint": "限制单次文生图提示词长度，避免模型误调用生成过长请求。",
+    "type": "int",
+    "default": 1000
+  },
+  "send_provider_text_fallback": {
+    "description": "返回 Provider 文本兜底",
+    "hint": "未提取到图片时，是否把 Provider 返回的文本作为失败说明返回。",
+    "type": "bool",
+    "default": true
+  },
+  "request_timeout_sec": {
+    "description": "图片下载超时秒数",
+    "hint": "从 Provider 返回的图片 URL 下载到本地的超时时间。",
+    "type": "int",
+    "default": 60
+  }
+}
