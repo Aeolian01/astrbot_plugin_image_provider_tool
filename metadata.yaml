@@ -2,7 +2,7 @@ name: astrbot_plugin_image_provider_tool
 display_name: Image Provider Tool
 desc: Let the LLM generate images through an AstrBot built-in provider.
 help: Registers a generate_image LLM tool that asks an AstrBot provider to create images and sends the returned image.
-version: v0.1.2
+version: v0.1.3
 author: Aeolian01
 repo: https://github.com/Aeolian01/astrbot_plugin_image_provider_tool
 support_platforms:

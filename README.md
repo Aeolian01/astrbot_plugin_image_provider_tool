@@ -10,7 +10,9 @@
 - 默认模型名为 `qwen-image-2.0-pro`。
 - 支持通过插件配置选择 AstrBot Provider。
 - 支持通过工具参数传入模型别名、尺寸和负向提示词。
-- 优先使用 AstrBot Provider 的结构化 user content 调用，兼容百炼/Qwen 图像模型要求的单个 text content item。
+- 对 `qwen-image*` 和 `wan2.7-image*` 使用百炼同步图像接口，并复用所选 AstrBot Provider 的 API Key。
+- 自动根据 Provider 的 `api_base` 选择北京或新加坡 DashScope 图像接口。
+- 其他模型继续使用 AstrBot Provider 的结构化 user content 兜底。
 - 从 Provider 返回的 URL、Markdown 图片、JSON 图片字段或 base64 图片中提取图片。
 - 将图片保存到 `plugin_data/astrbot_plugin_image_provider_tool/generated/` 后发送本地图片。
 
@@ -20,7 +22,7 @@
 | --- | --- | --- |
 | `enable` | `true` | 是否启用插件 |
 | `image_provider_id` | 空 | 文生图 Provider ID，使用 AstrBot 内置 Provider |
-| `default_model_name` | `qwen-image-2.0-pro` | 默认写入提示中的模型名 |
+| `default_model_name` | `qwen-image-2.0-pro` | 默认文生图模型名 |
 | `model_aliases` | `qwen-image-2.0-pro`, `wan2.7-image-pro` | `generate_image` 可填写的模型名 |
 | `max_prompt_chars` | `1000` | 单次提示词最大字符数 |
 | `send_provider_text_fallback` | `true` | 未提取到图片时是否返回 Provider 文本 |
@@ -54,8 +56,8 @@ generate_image(
 
 ## 注意事项
 
-- 本插件使用 AstrBot 内置 Provider，不直接调用 DashScope/OpenAI API。
-- `model` 参数只会写入 Provider 提示词；底层是否真正切换模型取决于 AstrBot Provider 自身能力。
-- 对支持 `contexts` 的 Provider，插件会发送单条 user 消息和单个 text content item，避免图像模型拒绝普通 Chat Completions 消息结构。
+- 本插件只复用 AstrBot 内置 Provider 的配置与 API Key，不在插件配置中保存 API Key。
+- `qwen-image*` 和 `wan2.7-image*` 会直接请求百炼 `multimodal-generation/generation` 同步接口，避免 AstrBot 文本聊天解析丢失图片字段。
+- 对非百炼图像模型，`model` 参数只会写入 Provider 提示词；底层是否真正切换模型取决于所选 AstrBot Provider 自身能力。
 - 如果 Provider 只返回普通文本，没有返回图片 URL/base64，本插件会返回明确失败说明。
 - 只实现文生图，不实现图生图、局部编辑或多图参考。

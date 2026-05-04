@@ -7,14 +7,14 @@
   },
   "image_provider_id": {
     "description": "文生图 Provider ID",
-    "hint": "选择 AstrBot WebUI 中已配置、可处理文生图请求的 Provider。留空时尝试使用当前会话 Provider，再回退到第一个可用 Provider。",
+    "hint": "选择 AstrBot WebUI 中已配置、可处理文生图请求的 Provider。Qwen/Wan 百炼模型会复用该 Provider 的 API Key。留空时尝试使用当前会话 Provider，再回退到第一个可用 Provider。",
     "type": "string",
     "default": "",
     "_special": "select_provider"
   },
   "default_model_name": {
     "description": "默认模型名",
-    "hint": "默认写入文生图提示中的模型名。底层是否真正切换模型取决于所选 AstrBot Provider。",
+    "hint": "默认文生图模型名。qwen-image* 与 wan2.7-image* 会使用百炼同步图像接口。",
     "type": "string",
     "default": "qwen-image-2.0-pro"
   },
@@ -40,8 +40,8 @@
     "default": true
   },
   "request_timeout_sec": {
-    "description": "图片下载超时秒数",
-    "hint": "从 Provider 返回的图片 URL 下载到本地的超时时间。",
+    "description": "请求超时秒数",
+    "hint": "百炼图像接口调用与图片 URL 下载到本地的超时时间。",
     "type": "int",
     "default": 60
   }

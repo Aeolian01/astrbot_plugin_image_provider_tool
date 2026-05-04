@@ -97,12 +97,28 @@ class FakeProviderMeta:
 
 
 class FakeProvider:
-    def __init__(self, response=None):
+    def __init__(self, response=None, provider_config=None, current_key=None):
         self.response = response or FakeResponse()
         self.calls = []
+        self.provider_config = provider_config or {
+            "key": ["sk-test"],
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "timeout": 120,
+        }
+        self.current_key = current_key
+        self.timeout = self.provider_config.get("timeout", 120)
 
     def meta(self):
         return FakeProviderMeta()
+
+    def get_current_key(self):
+        if self.current_key is not None:
+            return self.current_key
+        keys = self.provider_config.get("key", [""])
+        return keys[0] if keys else ""
+
+    def get_keys(self):
+        return self.provider_config.get("key", [""])
 
     async def text_chat(self, **kwargs):
         self.calls.append(kwargs)
@@ -142,13 +158,58 @@ def collect_async(gen):
     return asyncio.run(runner())
 
 
+class CapturingImageProviderToolPlugin(main.ImageProviderToolPlugin):
+    def __init__(self, context, config=None):
+        super().__init__(context, config)
+        self.bailian_posts = []
+        self.bailian_response = {
+            "output": {
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {
+                                    "image": "https://dashscope-result.aliyuncs.com/result.png"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "request_id": "rid-ok",
+        }
+
+    def _post_bailian_generation(self, endpoint, api_key, payload, timeout, headers):
+        self.bailian_posts.append(
+            {
+                "endpoint": endpoint,
+                "api_key": api_key,
+                "payload": payload,
+                "timeout": timeout,
+                "headers": headers,
+            }
+        )
+        return self.bailian_response
+
+
 class ImageProviderToolTests(unittest.TestCase):
-    def make_plugin(self, config=None, context=None):
-        plugin = main.ImageProviderToolPlugin(context or FakeContext(), config or {})
+    def make_plugin(self, config=None, context=None, plugin_cls=main.ImageProviderToolPlugin):
+        plugin = plugin_cls(context or FakeContext(), config or {})
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         plugin.generated_dir = Path(tmp.name)
         return plugin
+
+    @staticmethod
+    def non_bailian_config(extra=None):
+        config = {
+            "image_provider_id": "configured-provider",
+            "default_model_name": "local-image-model",
+            "model_aliases": ["local-image-model"],
+        }
+        if extra:
+            config.update(extra)
+        return config
 
     def test_extracts_markdown_image_url(self):
         plugin = self.make_plugin()
@@ -180,7 +241,7 @@ class ImageProviderToolTests(unittest.TestCase):
 
     def test_provider_text_fallback_when_no_image(self):
         context = FakeContext(FakeResponse("这里只是普通文本"))
-        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        plugin = self.make_plugin(self.non_bailian_config(), context)
         result = collect_async(plugin.generate_image(FakeEvent(), "画一只猫"))
         self.assertEqual(len(result), 1)
         self.assertIn("Provider 未返回可提取的图片", result[0])
@@ -188,7 +249,7 @@ class ImageProviderToolTests(unittest.TestCase):
 
     def test_provider_call_uses_structured_user_content(self):
         context = FakeContext(FakeResponse("这里只是普通文本"))
-        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        plugin = self.make_plugin(self.non_bailian_config(), context)
         collect_async(plugin.generate_image(FakeEvent(), "画一只猫"))
         self.assertEqual(len(context.provider.calls), 1)
         self.assertEqual(context.llm_generate_calls, [])
@@ -205,7 +266,7 @@ class ImageProviderToolTests(unittest.TestCase):
     def test_falls_back_to_llm_generate_for_legacy_provider(self):
         provider = LegacyProvider(FakeResponse("这里只是普通文本"))
         context = FakeContext(FakeResponse("这里只是普通文本"), provider)
-        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        plugin = self.make_plugin(self.non_bailian_config(), context)
         collect_async(plugin.generate_image(FakeEvent(), "画一只猫"))
         self.assertEqual(provider.calls, [])
         self.assertEqual(len(context.llm_generate_calls), 1)
@@ -216,12 +277,138 @@ class ImageProviderToolTests(unittest.TestCase):
             b"\x89PNG\r\n\x1a\n" + b"0" * 128
         ).decode("ascii")
         context = FakeContext(FakeResponse(f"data:image/png;base64,{png}"))
-        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        plugin = self.make_plugin(self.non_bailian_config(), context)
         event = FakeEvent()
         result = collect_async(plugin.generate_image(event, "画一只猫"))
         self.assertEqual(len(event.sent), 1)
         self.assertIn("图片已生成并发送", result[-1])
         self.assertTrue(list(plugin.generated_dir.iterdir()))
+
+    def test_bailian_payload_uses_single_text_item_and_parameters(self):
+        provider = FakeProvider()
+        context = FakeContext(provider=provider)
+        plugin = self.make_plugin(
+            {"image_provider_id": "configured-provider"},
+            context,
+            CapturingImageProviderToolPlugin,
+        )
+        response = asyncio.run(
+            plugin._call_provider(
+                "configured-provider",
+                "a cute kitten",
+                "qwen-image-2.0-pro",
+                "1024*1024",
+                "bad hands",
+            )
+        )
+        self.assertIsInstance(response, main.ProviderCallResult)
+        self.assertEqual(len(plugin.bailian_posts), 1)
+        post = plugin.bailian_posts[0]
+        self.assertEqual(
+            post["endpoint"],
+            main.BAILIAN_BEIJING_GENERATION_ENDPOINT,
+        )
+        self.assertEqual(post["api_key"], "sk-test")
+        self.assertEqual(post["timeout"], 120)
+        payload = post["payload"]
+        self.assertEqual(payload["model"], "qwen-image-2.0-pro")
+        messages = payload["input"]["messages"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(len(messages[0]["content"]), 1)
+        self.assertEqual(messages[0]["content"][0], {"text": "a cute kitten"})
+        self.assertEqual(
+            payload["parameters"],
+            {"size": "1024*1024", "negative_prompt": "bad hands"},
+        )
+
+    def test_bailian_endpoint_uses_singapore_api_base(self):
+        provider = FakeProvider(
+            provider_config={
+                "key": ["sk-sg"],
+                "api_base": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            }
+        )
+        context = FakeContext(provider=provider)
+        plugin = self.make_plugin(
+            {"image_provider_id": "configured-provider"},
+            context,
+            CapturingImageProviderToolPlugin,
+        )
+        asyncio.run(
+            plugin._call_provider(
+                "configured-provider",
+                "a mountain",
+                "wan2.7-image-pro",
+                "",
+                "",
+            )
+        )
+        self.assertEqual(
+            plugin.bailian_posts[0]["endpoint"],
+            main.BAILIAN_SINGAPORE_GENERATION_ENDPOINT,
+        )
+
+    def test_extracts_bailian_choice_image_url(self):
+        plugin = self.make_plugin()
+        raw = {
+            "output": {
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {
+                                    "image": "https://dashscope-result.aliyuncs.com/result.png"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        candidates = plugin._extract_image_candidates("", raw)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(
+            candidates[0].value,
+            "https://dashscope-result.aliyuncs.com/result.png",
+        )
+
+    def test_bailian_api_error_message_is_clear(self):
+        context = FakeContext(provider=FakeProvider())
+        plugin = self.make_plugin(
+            {"image_provider_id": "configured-provider"},
+            context,
+            CapturingImageProviderToolPlugin,
+        )
+        plugin.bailian_response = {
+            "request_id": "rid-error",
+            "code": "InvalidParameter",
+            "message": "bad request",
+        }
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(
+                plugin._call_provider(
+                    "configured-provider",
+                    "a kitten",
+                    "qwen-image-2.0-pro",
+                    "",
+                    "",
+                )
+            )
+        message = str(caught.exception)
+        self.assertIn("InvalidParameter", message)
+        self.assertIn("bad request", message)
+        self.assertIn("rid-error", message)
+        self.assertNotIn("sk-test", message)
+
+    def test_missing_bailian_key_returns_clear_error(self):
+        provider = FakeProvider(provider_config={"key": [], "api_base": ""}, current_key="")
+        context = FakeContext(provider=provider)
+        plugin = self.make_plugin({"image_provider_id": "configured-provider"}, context)
+        result = collect_async(plugin.generate_image(FakeEvent(), "a kitten"))
+        self.assertEqual(len(result), 1)
+        self.assertIn("Provider 未配置可用 API Key", result[0])
+        self.assertNotIn("sk-", result[0])
 
 
 if __name__ == "__main__":

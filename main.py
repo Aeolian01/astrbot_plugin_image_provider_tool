@@ -40,6 +40,14 @@ IMAGE_KEYS = {
     "base64",
     "data",
 }
+BAILIAN_BEIJING_GENERATION_ENDPOINT = (
+    "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+    "multimodal-generation/generation"
+)
+BAILIAN_SINGAPORE_GENERATION_ENDPOINT = (
+    "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/"
+    "multimodal-generation/generation"
+)
 
 
 @dataclass
@@ -62,6 +70,12 @@ class ImageCandidate:
     kind: str
     value: str
     fmt: str = "png"
+
+
+@dataclass
+class ProviderCallResult:
+    completion_text: str = ""
+    raw_completion: Any = None
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -258,6 +272,213 @@ class ImageProviderToolPlugin(Star):
         return "\n".join(lines)
 
     @staticmethod
+    def _is_bailian_image_model(model: str) -> bool:
+        clean = str(model or "").strip().lower()
+        return clean.startswith("qwen-image") or clean.startswith("wan2.7-image")
+
+    @staticmethod
+    def _normalize_key_value(value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                clean = ImageProviderToolPlugin._normalize_key_value(item)
+                if clean:
+                    return clean
+            return ""
+        clean = str(value or "").strip()
+        return clean
+
+    async def _provider_api_key(self, provider: Any) -> str:
+        getter = getattr(provider, "get_current_key", None)
+        if callable(getter):
+            try:
+                key = self._normalize_key_value(await self._maybe_await(getter()))
+                if key:
+                    return key
+            except Exception as exc:
+                logger.warning(f"[Image Provider Tool] 读取当前 Provider Key 失败: {exc}")
+
+        keys_getter = getattr(provider, "get_keys", None)
+        if callable(keys_getter):
+            try:
+                key = self._normalize_key_value(await self._maybe_await(keys_getter()))
+                if key:
+                    return key
+            except Exception as exc:
+                logger.warning(f"[Image Provider Tool] 读取 Provider Key 列表失败: {exc}")
+
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        if isinstance(provider_config, dict):
+            for field_name in ("key", "api_key", "dashscope_api_key"):
+                key = self._normalize_key_value(provider_config.get(field_name))
+                if key:
+                    return key
+        return ""
+
+    @staticmethod
+    def _provider_api_base(provider: Any) -> str:
+        provider_config = getattr(provider, "provider_config", {}) or {}
+        if isinstance(provider_config, dict):
+            api_base = str(provider_config.get("api_base", "") or "").strip()
+            if api_base:
+                return api_base
+
+        client = getattr(provider, "client", None)
+        base_url = getattr(client, "base_url", None)
+        return str(base_url or "").strip()
+
+    @classmethod
+    def _bailian_generation_endpoint(cls, provider: Any) -> str:
+        api_base = cls._provider_api_base(provider).lower()
+        if "dashscope-intl.aliyuncs.com" in api_base:
+            return BAILIAN_SINGAPORE_GENERATION_ENDPOINT
+        return BAILIAN_BEIJING_GENERATION_ENDPOINT
+
+    @staticmethod
+    def _provider_timeout_sec(provider: Any, default: int) -> int:
+        timeout = getattr(provider, "timeout", None)
+        if timeout is None:
+            provider_config = getattr(provider, "provider_config", {}) or {}
+            if isinstance(provider_config, dict):
+                timeout = provider_config.get("timeout")
+        return _as_int(timeout, default)
+
+    @staticmethod
+    def _bailian_image_payload(
+        prompt: str,
+        model: str,
+        size: str,
+        negative_prompt: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": prompt,
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        parameters: dict[str, Any] = {}
+        if size:
+            parameters["size"] = size
+        if negative_prompt:
+            parameters["negative_prompt"] = negative_prompt
+        if parameters:
+            payload["parameters"] = parameters
+        return payload
+
+    def _provider_custom_headers(self, provider: Any) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        for source in (
+            getattr(provider, "custom_headers", None),
+            (getattr(provider, "provider_config", {}) or {}).get("custom_headers", None)
+            if isinstance(getattr(provider, "provider_config", {}) or {}, dict)
+            else None,
+        ):
+            if not isinstance(source, dict):
+                continue
+            for key, value in source.items():
+                if key and value is not None:
+                    headers[str(key)] = str(value)
+        return headers
+
+    def _post_bailian_generation(
+        self,
+        endpoint: str,
+        api_key: str,
+        payload: dict[str, Any],
+        timeout: int,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        request_headers = dict(headers)
+        request_headers.update(
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": "AstrBot Image Provider Tool/0.1",
+            }
+        )
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=data,
+            headers=request_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                error_data = json.loads(body)
+            except json.JSONDecodeError:
+                error_data = {"code": f"HTTP_{exc.code}", "message": body}
+            self._raise_bailian_error(error_data, fallback_code=f"HTTP_{exc.code}")
+            raise
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"百炼图像接口调用失败：网络错误：{exc}") from exc
+
+        try:
+            response = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("百炼图像接口调用失败：返回内容不是合法 JSON") from exc
+        if not isinstance(response, dict):
+            raise RuntimeError("百炼图像接口调用失败：返回 JSON 不是对象")
+        return response
+
+    @staticmethod
+    def _raise_bailian_error(raw: Any, fallback_code: str = "") -> None:
+        if not isinstance(raw, dict):
+            return
+        code = str(raw.get("code", "") or fallback_code or "").strip()
+        message = str(raw.get("message", "") or "").strip()
+        if not code and not message:
+            return
+        request_id = str(raw.get("request_id", "") or "").strip()
+        parts = ["百炼图像接口调用失败"]
+        if code:
+            parts.append(code)
+        if message:
+            parts.append(message)
+        if request_id:
+            parts.append(f"request_id={request_id}")
+        raise RuntimeError("：".join(parts))
+
+    async def _call_bailian_image_api(
+        self,
+        provider: Any,
+        prompt: str,
+        model: str,
+        size: str,
+        negative_prompt: str,
+    ) -> ProviderCallResult:
+        api_key = await self._provider_api_key(provider)
+        if not api_key:
+            raise RuntimeError("百炼图像接口调用失败：Provider 未配置可用 API Key")
+
+        endpoint = self._bailian_generation_endpoint(provider)
+        timeout = self._provider_timeout_sec(provider, self.cfg.request_timeout_sec)
+        payload = self._bailian_image_payload(prompt, model, size, negative_prompt)
+        headers = self._provider_custom_headers(provider)
+        raw = await asyncio.to_thread(
+            self._post_bailian_generation,
+            endpoint,
+            api_key,
+            payload,
+            timeout,
+            headers,
+        )
+        self._raise_bailian_error(raw)
+        return ProviderCallResult(raw_completion=raw)
+
+    @staticmethod
     def _supports_structured_contexts(func: Any) -> bool:
         try:
             signature = inspect.signature(func)
@@ -294,8 +515,25 @@ class ImageProviderToolPlugin(Star):
             contexts=[self._structured_user_context(user_prompt)],
         )
 
-    async def _call_provider(self, provider_id: str, user_prompt: str) -> Any:
+    async def _call_provider(
+        self,
+        provider_id: str,
+        prompt: str,
+        model: str,
+        size: str,
+        negative_prompt: str,
+    ) -> Any:
         provider = await self._get_provider_by_id(provider_id)
+        if provider is not None and self._is_bailian_image_model(model):
+            return await self._call_bailian_image_api(
+                provider,
+                prompt,
+                model,
+                size,
+                negative_prompt,
+            )
+
+        user_prompt = self._build_prompt(prompt, model, size, negative_prompt)
         if provider is not None:
             llm_resp = await self._call_provider_text_chat(provider, user_prompt)
             if llm_resp is not None:
@@ -553,15 +791,17 @@ class ImageProviderToolPlugin(Star):
             yield "文生图失败：未找到可用的 AstrBot Provider，请在插件配置中选择 image_provider_id。"
             return
 
-        user_prompt = self._build_prompt(
-            clean_prompt,
-            model_name,
-            self._clean_text(size),
-            self._clean_text(negative_prompt),
-        )
+        clean_size = self._clean_text(size)
+        clean_negative_prompt = self._clean_text(negative_prompt)
 
         try:
-            llm_resp = await self._call_provider(provider_id, user_prompt)
+            llm_resp = await self._call_provider(
+                provider_id,
+                clean_prompt,
+                model_name,
+                clean_size,
+                clean_negative_prompt,
+            )
         except Exception as exc:
             logger.error(f"[Image Provider Tool] Provider 调用失败: {exc}", exc_info=True)
             yield f"文生图失败：Provider 调用失败：{exc}"
