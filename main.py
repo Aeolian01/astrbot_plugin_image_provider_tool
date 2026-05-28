@@ -48,6 +48,14 @@ BAILIAN_SINGAPORE_GENERATION_ENDPOINT = (
     "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/"
     "multimodal-generation/generation"
 )
+MAX_1080P_LONG_SIDE = 1920
+MAX_1080P_SHORT_SIDE = 1080
+SIZE_DIMENSIONS_RE = re.compile(
+    r"(?P<width>\d+)\s*(?:x|\*|×|＊|乘|by)\s*(?P<height>\d+)",
+    re.IGNORECASE,
+)
+SQUARE_SIZE_RE = re.compile(r"(?P<size>\d+)\s*(?:px|像素)?", re.IGNORECASE)
+PROGRESSIVE_SIZE_RE = re.compile(r"(?P<height>\d{3,4})p", re.IGNORECASE)
 
 
 @dataclass
@@ -181,6 +189,52 @@ class ImageProviderToolPlugin(Star):
     @staticmethod
     def _clean_text(text: Any) -> str:
         return " ".join(str(text or "").split())
+
+    @staticmethod
+    def _cap_dimensions_to_1080p(width: int, height: int) -> tuple[int, int]:
+        if width <= 0 or height <= 0:
+            return width, height
+        if width >= height:
+            max_width, max_height = MAX_1080P_LONG_SIDE, MAX_1080P_SHORT_SIDE
+        else:
+            max_width, max_height = MAX_1080P_SHORT_SIDE, MAX_1080P_LONG_SIDE
+        scale = min(1.0, max_width / width, max_height / height)
+        if scale >= 1.0:
+            return width, height
+        return max(1, int(width * scale)), max(1, int(height * scale))
+
+    @classmethod
+    def _limit_size_to_1080p(cls, size: Any) -> str:
+        clean = cls._clean_text(size)
+        if not clean:
+            return ""
+
+        dimension_match = SIZE_DIMENSIONS_RE.search(clean)
+        if dimension_match:
+            width, height = cls._cap_dimensions_to_1080p(
+                int(dimension_match.group("width")),
+                int(dimension_match.group("height")),
+            )
+            return f"{width}*{height}"
+
+        square_match = SQUARE_SIZE_RE.fullmatch(clean)
+        if square_match:
+            side = int(square_match.group("size"))
+            width, height = cls._cap_dimensions_to_1080p(side, side)
+            return f"{width}*{height}"
+
+        lowered = clean.lower()
+        if lowered in {"fhd", "fullhd", "full hd", "4k", "uhd", "2k", "qhd"}:
+            return f"{MAX_1080P_LONG_SIDE}*{MAX_1080P_SHORT_SIDE}"
+
+        progressive_match = PROGRESSIVE_SIZE_RE.fullmatch(clean)
+        if progressive_match:
+            height = int(progressive_match.group("height"))
+            width = int(height * 16 / 9)
+            width, height = cls._cap_dimensions_to_1080p(width, height)
+            return f"{width}*{height}"
+
+        return clean
 
     @staticmethod
     def _provider_id(provider: Any) -> str:
@@ -523,17 +577,23 @@ class ImageProviderToolPlugin(Star):
         size: str,
         negative_prompt: str,
     ) -> Any:
+        safe_size = self._limit_size_to_1080p(size)
+        if safe_size != self._clean_text(size):
+            logger.info(
+                f"[Image Provider Tool] 图片尺寸已规范到 1080p 范围内：{safe_size}"
+            )
+
         provider = await self._get_provider_by_id(provider_id)
         if provider is not None and self._is_bailian_image_model(model):
             return await self._call_bailian_image_api(
                 provider,
                 prompt,
                 model,
-                size,
+                safe_size,
                 negative_prompt,
             )
 
-        user_prompt = self._build_prompt(prompt, model, size, negative_prompt)
+        user_prompt = self._build_prompt(prompt, model, safe_size, negative_prompt)
         if provider is not None:
             llm_resp = await self._call_provider_text_chat(provider, user_prompt)
             if llm_resp is not None:
@@ -762,7 +822,7 @@ class ImageProviderToolPlugin(Star):
         Args:
             prompt(string): 图片生成提示词，描述主体、风格、构图、文字等要求。
             model(string): 可选模型名/模型别名，例如 qwen-image-2.0-pro。
-            size(string): 可选尺寸要求，例如 1024*1024 或 2048*2048。
+            size(string): 可选尺寸要求，例如 1024*1024 或 1920*1080，最大限制为 1080p。
             negative_prompt(string): 可选负向提示词，说明不希望出现的内容。
         """
         if not self.cfg.enable:

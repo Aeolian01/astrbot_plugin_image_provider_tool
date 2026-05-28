@@ -9,7 +9,7 @@
 - 注册 `generate_image` LLM 工具。
 - 默认模型名为 `qwen-image-2.0-pro`。
 - 支持通过插件配置选择 AstrBot Provider。
-- 支持通过工具参数传入模型别名、尺寸和负向提示词。
+- 支持通过工具参数传入模型别名、尺寸和负向提示词，尺寸会被限制在 1080p 范围内。
 - 对 `qwen-image*` 和 `wan2.7-image*` 使用百炼同步图像接口，并复用所选 AstrBot Provider 的 API Key。
 - 自动根据 Provider 的 `api_base` 选择北京或新加坡 DashScope 图像接口。
 - 其他模型继续使用 AstrBot Provider 的结构化 user content 兜底。
@@ -49,7 +49,7 @@
 generate_image(
     prompt="赛博朋克风格的猫咖海报，霓虹灯，雨夜，中文标题“夜猫咖啡”",
     model="qwen-image-2.0-pro",
-    size="2048*2048",
+    size="1080*1080",
     negative_prompt="低清晰度，文字错误"
 )
 ```
@@ -59,5 +59,6 @@ generate_image(
 - 本插件只复用 AstrBot 内置 Provider 的配置与 API Key，不在插件配置中保存 API Key。
 - `qwen-image*` 和 `wan2.7-image*` 会直接请求百炼 `multimodal-generation/generation` 同步接口，避免 AstrBot 文本聊天解析丢失图片字段。
 - 对非百炼图像模型，`model` 参数只会写入 Provider 提示词；底层是否真正切换模型取决于所选 AstrBot Provider 自身能力。
+- `size` 参数最大限制为 1080p：横图不超过 `1920*1080`，竖图不超过 `1080*1920`，正方形不超过 `1080*1080`。
 - 如果 Provider 只返回普通文本，没有返回图片 URL/base64，本插件会返回明确失败说明。
 - 只实现文生图，不实现图生图、局部编辑或多图参考。

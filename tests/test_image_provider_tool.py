@@ -284,6 +284,49 @@ class ImageProviderToolTests(unittest.TestCase):
         self.assertIn("图片已生成并发送", result[-1])
         self.assertTrue(list(plugin.generated_dir.iterdir()))
 
+    def test_size_is_limited_to_1080p(self):
+        plugin = self.make_plugin()
+        cases = {
+            "2048*2048": "1080*1080",
+            "2560x1440": "1920*1080",
+            "1440p": "1920*1080",
+            "1024*2048": "960*1920",
+            "1024*1024": "1024*1024",
+        }
+        for requested, expected in cases.items():
+            with self.subTest(requested=requested):
+                self.assertEqual(plugin._limit_size_to_1080p(requested), expected)
+
+    def test_call_provider_caps_size_before_bailian_payload(self):
+        provider = FakeProvider()
+        context = FakeContext(provider=provider)
+        plugin = self.make_plugin(
+            {"image_provider_id": "configured-provider"},
+            context,
+            CapturingImageProviderToolPlugin,
+        )
+        asyncio.run(
+            plugin._call_provider(
+                "configured-provider",
+                "a square poster",
+                "qwen-image-2.0-pro",
+                "2048*2048",
+                "",
+            )
+        )
+        payload = plugin.bailian_posts[0]["payload"]
+        self.assertEqual(payload["parameters"], {"size": "1080*1080"})
+
+    def test_non_bailian_provider_prompt_uses_limited_size(self):
+        context = FakeContext(FakeResponse("plain text"))
+        plugin = self.make_plugin(self.non_bailian_config(), context)
+        collect_async(
+            plugin.generate_image(FakeEvent(), "draw a poster", size="2048*2048")
+        )
+        text = context.provider.calls[0]["contexts"][0]["content"][0]["text"]
+        self.assertIn("1080*1080", text)
+        self.assertNotIn("2048*2048", text)
+
     def test_bailian_payload_uses_single_text_item_and_parameters(self):
         provider = FakeProvider()
         context = FakeContext(provider=provider)
